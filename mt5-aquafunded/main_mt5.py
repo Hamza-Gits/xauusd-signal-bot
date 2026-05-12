@@ -123,8 +123,8 @@ async def main():
     setup_logging()
     logger.info("MT5 AquaFunded bot starting up...")
 
-    # Connect to MetaAPI / AquaFunded
-    mt5 = MT5Client(config.METAAPI_TOKEN, config.METAAPI_ACCOUNT_ID)
+    # Connect directly to AquaFunded MT5 terminal (no third-party service)
+    mt5 = MT5Client(config.MT5_LOGIN, config.MT5_PASSWORD, config.MT5_SERVER)
     try:
         await mt5.connect()
         balance = await mt5.get_balance()
