@@ -1,0 +1,43 @@
+"""Load and validate configuration from environment variables."""
+import os
+import sys
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+def _require(name: str) -> str:
+    value = os.getenv(name)
+    if not value:
+        print(f"[FATAL] Required environment variable missing: {name}", file=sys.stderr)
+        sys.exit(1)
+    return value
+
+
+# OANDA
+OANDA_API_KEY = _require("OANDA_API_KEY")
+OANDA_ACCOUNT_ID = _require("OANDA_ACCOUNT_ID")
+OANDA_ENV = os.getenv("OANDA_ENV", "live").lower().strip()
+if OANDA_ENV not in ("live", "practice"):
+    print(f"[FATAL] OANDA_ENV must be 'live' or 'practice', got: {OANDA_ENV}", file=sys.stderr)
+    sys.exit(1)
+
+# Telegram
+TELEGRAM_API_ID = int(_require("TELEGRAM_API_ID"))
+TELEGRAM_API_HASH = _require("TELEGRAM_API_HASH")
+TELEGRAM_PHONE = _require("TELEGRAM_PHONE")
+TELEGRAM_SESSION_STRING = os.getenv("TELEGRAM_SESSION_STRING", "").strip()
+
+_raw_groups = _require("TELEGRAM_GROUP_IDS")
+TELEGRAM_GROUP_IDS = [g.strip() for g in _raw_groups.split(",") if g.strip()]
+
+# Risk
+RISK_PCT = float(os.getenv("RISK_PCT", "0.01"))
+FORCE_MIN_UNITS = os.getenv("FORCE_MIN_UNITS", "true").lower() == "true"
+
+# Notifications
+NOTIFY_CHAT_ID = os.getenv("NOTIFY_CHAT_ID", "").strip()
+
+# Instrument
+INSTRUMENT = "XAU_USD"
+ACCOUNT_CURRENCY = "GBP"
