@@ -71,8 +71,8 @@ class OandaClient:
         """Get the N most recent closed trades."""
         data = self._request(
             "GET",
-            f"/v3/accounts/{self.account_id}/closedTrades",
-            params={"count": count},
+            f"/v3/accounts/{self.account_id}/trades",
+            params={"state": "CLOSED", "count": count},
         )
         return data.get("trades", [])
 
