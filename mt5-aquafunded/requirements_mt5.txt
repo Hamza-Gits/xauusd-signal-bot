@@ -1,0 +1,4 @@
+metaapi-cloud-sdk==27.0.4
+telethon==1.36.0
+python-dotenv==1.0.1
+truststore==0.10.1

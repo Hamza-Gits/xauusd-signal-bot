@@ -1,0 +1,36 @@
+name: MT5 AquaFunded Bot
+
+on:
+  schedule:
+    - cron: '0 4,10,16,22 * * *'   # Same safe restart times as OANDA bot
+  workflow_dispatch:                  # Manual trigger
+
+jobs:
+  run-mt5-bot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r mt5-aquafunded/requirements_mt5.txt
+
+      - name: Run MT5 bot
+        run: python mt5-aquafunded/main_mt5.py
+        env:
+          METAAPI_TOKEN:             ${{ secrets.METAAPI_TOKEN }}
+          METAAPI_ACCOUNT_ID:        ${{ secrets.METAAPI_ACCOUNT_ID }}
+          TELEGRAM_API_ID:           ${{ secrets.TELEGRAM_API_ID }}
+          TELEGRAM_API_HASH:         ${{ secrets.TELEGRAM_API_HASH }}
+          TELEGRAM_PHONE:            ${{ secrets.TELEGRAM_PHONE }}
+          TELEGRAM_SESSION_STRING:   ${{ secrets.TELEGRAM_SESSION_STRING }}
+          TELEGRAM_GROUP_IDS:        ${{ secrets.TELEGRAM_GROUP_IDS }}
+          MT5_RISK_PCT:              ${{ secrets.MT5_RISK_PCT }}
+          NOTIFY_CHAT_ID:            ${{ secrets.NOTIFY_CHAT_ID }}
