@@ -222,7 +222,16 @@ async def main_async():
     # Start background task to check for closed trades
     check_closed_trades_task = asyncio.create_task(check_closed_trades())
 
-    await listener.start()
+    # Auto-reconnect loop — survives Telegram disconnects
+    while True:
+        try:
+            await listener.start()
+            logger.warning("Telegram listener exited cleanly. Reconnecting in 10s...")
+        except Exception:
+            logger.exception("Listener crashed. Reconnecting in 30s...")
+            await asyncio.sleep(30)
+            continue
+        await asyncio.sleep(10)
 
 
 if __name__ == "__main__":
