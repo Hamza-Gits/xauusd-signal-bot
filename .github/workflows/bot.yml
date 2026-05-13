@@ -5,10 +5,14 @@ on:
     - cron: '0 4,10,16,22 * * *'  # Restart at 5am, 11am, 5pm, 11pm BST (avoids 9am signal window)
   workflow_dispatch:          # Allows manual start from GitHub
 
+concurrency:
+  group: xauusd-bot          # only one instance runs at a time
+  cancel-in-progress: false  # let the current run finish, queue the new one
+
 jobs:
   run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 350      # Runs for ~6 hours then restarts
+    timeout-minutes: 360     # hard safety-net; bot exits cleanly at 330 min
 
     steps:
       - name: Checkout code

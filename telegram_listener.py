@@ -42,14 +42,12 @@ class TelegramListener:
             loop=loop,
         )
         self.on_message: Optional[MessageHandler] = None
+        self._handler_registered = False
 
-    async def start(self):
-        await self.client.start(phone=lambda: self.phone)
-        me = await self.client.get_me()
-        logger.info(
-            f"Telegram listener connected as {me.username or me.first_name} "
-            f"({me.id}). Monitoring groups: {self.group_ids}"
-        )
+    def _register_handler(self):
+        """Register the NewMessage handler exactly once."""
+        if self._handler_registered:
+            return
 
         @self.client.on(events.NewMessage(chats=self.group_ids))
         async def _handler(event):
@@ -63,5 +61,15 @@ class TelegramListener:
                 except Exception:
                     logger.exception("on_message handler raised")
 
+        self._handler_registered = True
+
+    async def start(self):
+        await self.client.start(phone=lambda: self.phone)
+        me = await self.client.get_me()
+        logger.info(
+            f"Telegram listener connected as {me.username or me.first_name} "
+            f"({me.id}). Monitoring groups: {self.group_ids}"
+        )
+        self._register_handler()
         logger.info("Listening for signals...")
         await self.client.run_until_disconnected()

@@ -8,6 +8,7 @@ Dynamic risk: 3% after WIN, 2% after LOSE.
 import asyncio
 import logging
 import sys
+import time
 
 import config
 from oanda_client import OandaClient, OandaError
@@ -222,11 +223,21 @@ async def main_async():
     # Start background task to check for closed trades
     check_closed_trades_task = asyncio.create_task(check_closed_trades())
 
+    # Exit cleanly after 330 min so GitHub Actions marks the job as SUCCESS.
+    # The next scheduled run (every 6 h) picks up immediately after.
+    deadline = time.monotonic() + 330 * 60
+
     # Auto-reconnect loop — survives Telegram disconnects
     while True:
+        if time.monotonic() >= deadline:
+            logger.info("330-minute runtime reached — exiting cleanly for scheduled restart.")
+            return
+
         try:
             await listener.start()
             logger.warning("Telegram listener exited cleanly. Reconnecting in 10s...")
+        except asyncio.CancelledError:
+            raise  # let asyncio.run() handle proper shutdown
         except Exception:
             logger.exception("Listener crashed. Reconnecting in 30s...")
             await asyncio.sleep(30)
