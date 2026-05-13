@@ -15,6 +15,7 @@ from oanda_client import OandaClient, OandaError
 from risk_manager import RiskManager
 from signal_parser import parse_signal
 from telegram_listener import TelegramListener
+from telethon.errors import AuthKeyDuplicatedError, AuthKeyError, SessionRevokedError, UserDeactivatedError
 from trade_journal import (
     log_order,
     update_closed_trade,
@@ -258,6 +259,21 @@ async def main_async():
             logger.warning("Telegram listener exited cleanly. Reconnecting in 10s...")
         except asyncio.CancelledError:
             raise  # let asyncio.run() handle proper shutdown
+        except (AuthKeyDuplicatedError, AuthKeyError, SessionRevokedError, UserDeactivatedError) as e:
+            # Session is permanently dead — retrying will never work. Exit so the
+            # workflow run ends quickly instead of looping for 6h. The user must
+            # regenerate TELEGRAM_SESSION_STRING locally and update the GitHub secret.
+            logger.error(
+                "FATAL: Telegram session is dead (%s). "
+                "Regenerate it locally with `python generate_session.py` and update "
+                "the TELEGRAM_SESSION_STRING secret in GitHub.",
+                type(e).__name__,
+            )
+            await _notify(
+                f"❌ Telegram session DEAD ({type(e).__name__}).\n"
+                f"Run generate_session.py locally and update the GitHub secret."
+            )
+            sys.exit(1)
         except Exception:
             logger.exception("Listener crashed. Reconnecting in 30s...")
             await asyncio.sleep(30)
