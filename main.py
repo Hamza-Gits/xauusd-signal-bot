@@ -19,7 +19,6 @@ from telethon.errors import AuthKeyDuplicatedError, AuthKeyError, SessionRevoked
 from trade_journal import (
     log_order,
     update_closed_trade,
-    get_last_trade_result,
     get_win_loss_count,
 )
 
@@ -43,15 +42,6 @@ oanda: OandaClient
 risk: RiskManager
 listener: TelegramListener
 check_closed_trades_task: asyncio.Task = None
-
-
-def get_dynamic_risk_pct() -> float:
-    """Return 3% after WIN, 2% after LOSE, 2% initially."""
-    last_result = get_last_trade_result()
-    if last_result == "WIN":
-        return 0.03
-    else:  # LOSE or None (first trade)
-        return 0.02
 
 
 async def check_closed_trades():
@@ -111,10 +101,8 @@ async def handle_message(text: str) -> None:
         logger.error(f"Failed to fetch account/price data: {e}")
         return
 
-    # Dynamic risk based on last trade
-    dynamic_risk_pct = get_dynamic_risk_pct()
     risk_manager = RiskManager(
-        risk_pct=dynamic_risk_pct,
+        risk_pct=config.RISK_PCT,
         force_min_units=config.FORCE_MIN_UNITS,
     )
     units = risk_manager.calculate_units(balance, gbp_usd, signal)
@@ -201,7 +189,7 @@ async def main_async():
     logger.info(f"Trade history: {wins}W / {losses}L")
 
     risk = RiskManager(
-        risk_pct=get_dynamic_risk_pct(),
+        risk_pct=config.RISK_PCT,
         force_min_units=config.FORCE_MIN_UNITS,
     )
 
@@ -231,11 +219,10 @@ async def main_async():
         if _startup_notified:
             return
         _startup_notified = True
-        risk_pct = get_dynamic_risk_pct()
         await _notify(
             f"✅ Bot online\n"
             f"Balance: £{balance:.2f}\n"
-            f"Risk: {risk_pct:.0%} | Record: {wins}W/{losses}L\n"
+            f"Risk: {config.RISK_PCT:.0%} | Record: {wins}W/{losses}L\n"
             f"Groups: {len(config.TELEGRAM_GROUP_IDS)} monitored"
         )
 

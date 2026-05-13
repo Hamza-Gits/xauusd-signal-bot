@@ -2,7 +2,7 @@ name: XAUUSD Signal Bot
 
 on:
   schedule:
-    - cron: '0 4,10,16,22 * * *'  # Restart at 5am, 11am, 5pm, 11pm BST (avoids 9am signal window)
+    - cron: '0 7,12 * * 1-5'      # Weekdays only: 8am and 1pm BST (7am/12pm UTC), covers 8am–4pm signal window
   workflow_dispatch:          # Allows manual start from GitHub
 
 concurrency:

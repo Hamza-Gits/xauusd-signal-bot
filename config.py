@@ -32,7 +32,7 @@ _raw_groups = _require("TELEGRAM_GROUP_IDS")
 TELEGRAM_GROUP_IDS = [g.strip() for g in _raw_groups.split(",") if g.strip()]
 
 # Risk
-RISK_PCT = float(os.getenv("RISK_PCT", "0.01"))
+RISK_PCT = float(os.getenv("RISK_PCT", "0.03"))
 FORCE_MIN_UNITS = os.getenv("FORCE_MIN_UNITS", "true").lower() == "true"
 
 # Notifications
