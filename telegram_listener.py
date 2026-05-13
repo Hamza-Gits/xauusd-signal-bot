@@ -42,6 +42,7 @@ class TelegramListener:
             loop=loop,
         )
         self.on_message: Optional[MessageHandler] = None
+        self.on_ready: Optional[Callable[[], Awaitable[None]]] = None
         self._handler_registered = False
 
     def _register_handler(self):
@@ -72,4 +73,9 @@ class TelegramListener:
         )
         self._register_handler()
         logger.info("Listening for signals...")
+        if self.on_ready:
+            try:
+                await self.on_ready()
+            except Exception:
+                logger.exception("on_ready handler raised")
         await self.client.run_until_disconnected()

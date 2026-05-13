@@ -220,6 +220,26 @@ async def main_async():
     )
     listener.on_message = handle_message
 
+    # Fire a one-shot startup notification the first time the listener connects,
+    # so the user gets a Telegram heartbeat confirming the bot is alive and
+    # which groups it's actually watching.
+    _startup_notified = False
+
+    async def _on_ready():
+        nonlocal _startup_notified
+        if _startup_notified:
+            return
+        _startup_notified = True
+        risk_pct = get_dynamic_risk_pct()
+        await _notify(
+            f"✅ Bot online\n"
+            f"Balance: £{balance:.2f}\n"
+            f"Risk: {risk_pct:.0%} | Record: {wins}W/{losses}L\n"
+            f"Groups: {len(config.TELEGRAM_GROUP_IDS)} monitored"
+        )
+
+    listener.on_ready = _on_ready
+
     # Start background task to check for closed trades
     check_closed_trades_task = asyncio.create_task(check_closed_trades())
 

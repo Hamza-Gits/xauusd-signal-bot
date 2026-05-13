@@ -39,3 +39,4 @@ jobs:
           TELEGRAM_GROUP_IDS: ${{ secrets.TELEGRAM_GROUP_IDS }}
           RISK_PCT: ${{ secrets.RISK_PCT }}
           FORCE_MIN_UNITS: ${{ secrets.FORCE_MIN_UNITS }}
+          NOTIFY_CHAT_ID: ${{ secrets.NOTIFY_CHAT_ID }}
