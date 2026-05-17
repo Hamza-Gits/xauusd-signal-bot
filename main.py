@@ -194,9 +194,13 @@ async def handle_message(text: str) -> None:
         logger.warning("Duplicate signal — skipping")
         return
 
-    # Fetch live data
+    # Fetch live data — account summary gives us balance AND margin info,
+    # so we can pre-check that the trade we're about to place actually fits.
     try:
-        balance = oanda.get_account_balance()
+        account = oanda.get_account_summary()
+        balance = float(account["balance"])
+        margin_available = float(account.get("marginAvailable", 0))
+        margin_used = float(account.get("marginUsed", 0))
         gbp_usd = oanda.get_price("GBP_USD")
     except OandaError as e:
         logger.error(f"Failed to fetch account/price data: {e}")
@@ -209,6 +213,46 @@ async def handle_message(text: str) -> None:
     total_units = risk_manager.calculate_units(balance, gbp_usd, signal)
     if total_units is None:
         logger.warning("No units to trade — skipping")
+        return
+
+    # ---- Margin safety check ----
+    # Estimate margin for this position. XAU at 1:30 retail leverage needs
+    # ~3.33% of notional; we use a 4% safety estimate (covers 1:25 too).
+    # If placing this trade would leave us with less than 30% free margin
+    # of the total account NAV, we skip it — protects against margin-call
+    # cascades when 2-3 signals fire in close succession on a small account.
+    notional_gbp = (total_units * signal.entry) / gbp_usd
+    est_margin_required = notional_gbp * 0.04  # 4% — slightly conservative
+    nav = balance + margin_used  # rough NAV proxy
+    free_after = margin_available - est_margin_required
+    free_after_pct = (free_after / nav * 100) if nav > 0 else 0
+
+    logger.info(
+        f"Margin check: balance=£{balance:.2f}, free=£{margin_available:.2f}, "
+        f"used=£{margin_used:.2f}, est_required=£{est_margin_required:.2f}, "
+        f"free_after_pct={free_after_pct:.1f}%"
+    )
+
+    if free_after < 0:
+        logger.warning(
+            f"Insufficient margin: need ~£{est_margin_required:.2f}, "
+            f"have £{margin_available:.2f}. Skipping signal."
+        )
+        await _notify(
+            f"⚠️ Skipped {signal.direction} @ {signal.entry} — not enough free margin "
+            f"(need ~£{est_margin_required:.2f}, have £{margin_available:.2f})"
+        )
+        return
+
+    if free_after_pct < 30:
+        logger.warning(
+            f"Margin too tight after this trade ({free_after_pct:.1f}% free). "
+            f"Skipping to keep buffer for later signals."
+        )
+        await _notify(
+            f"⚠️ Skipped {signal.direction} @ {signal.entry} — would leave only "
+            f"{free_after_pct:.1f}% free margin (need 30% buffer)"
+        )
         return
 
     # Build list of (tp_label, tp_price) — only TPs the signal actually provided.
@@ -351,10 +395,12 @@ async def main_async():
         if _startup_notified:
             return
         _startup_notified = True
+        env_emoji = "🔴 LIVE" if config.OANDA_ENV == "live" else "🟢 PRACTICE"
         await _notify(
-            f"✅ Bot online\n"
+            f"✅ Bot online — {env_emoji}\n"
+            f"Account: {config.OANDA_ACCOUNT_ID}\n"
             f"Balance: £{balance:.2f}\n"
-            f"Risk: {config.RISK_PCT:.0%} | Record: {wins}W/{losses}L\n"
+            f"Risk: {config.RISK_PCT:.0%} per signal | Record: {wins}W/{losses}L\n"
             f"Groups: {len(config.TELEGRAM_GROUP_IDS)} monitored"
         )
 
