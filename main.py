@@ -143,8 +143,24 @@ async def check_closed_trades():
                 closing_price = float(trade.get("price", 0))
                 update_closed_trade(journal_entry["order_id"], closing_price, result)
 
+                # Notify on every leg close so the user has full visibility.
+                label = journal_entry.get("tp_label") or "leg"
+                direction = journal_entry.get("direction", "")
+                if result == "WIN":
+                    emoji = "🎯"
+                    verdict = f"{label} HIT"
+                elif result == "LOSE":
+                    emoji = "🛑"
+                    verdict = "SL HIT"
+                else:
+                    emoji = "⚖️"
+                    verdict = f"{label} closed at breakeven"
+                await _notify(
+                    f"{emoji} {verdict} — {direction} XAU/USD @ {closing_price}\n"
+                    f"P&L: £{pnl:.2f}"
+                )
+
                 if result == "WIN" and journal_entry.get("signal_id"):
-                    label = journal_entry.get("tp_label")
                     if label == "TP1":
                         tp1_won_groups.add(journal_entry["signal_id"])
                     elif label == "TP2":
@@ -209,6 +225,11 @@ async def _move_runners_to_breakeven(signal_ids: set):
                 )
             except OandaError as e:
                 logger.warning(f"Could not move SL on trade {trade_id}: {e}")
+                await _notify(
+                    f"⚠️ BE move FAILED on {leg.get('tp_label')} leg "
+                    f"({leg['direction']} trade {trade_id}). Check OANDA — "
+                    f"this leg still has its original SL."
+                )
 
 
 async def _trail_tp3_to_tp1(signal_ids: set):
@@ -256,6 +277,10 @@ async def _trail_tp3_to_tp1(signal_ids: set):
             )
         except OandaError as e:
             logger.warning(f"Could not trail TP3 SL on trade {trade_id}: {e}")
+            await _notify(
+                f"⚠️ TP3 trail FAILED ({tp3_leg['direction']} trade {trade_id}). "
+                f"Runner kept its previous SL — check OANDA."
+            )
 
 
 async def cancel_stale_orders():
@@ -334,6 +359,7 @@ async def handle_message(text: str) -> None:
     try:
         account = oanda.get_account_summary()
         balance = float(account["balance"])
+        nav = float(account.get("NAV", balance))  # NAV = balance + unrealised P&L
         margin_available = float(account.get("marginAvailable", 0))
         margin_used = float(account.get("marginUsed", 0))
         gbp_usd = oanda.get_price("GBP_USD")
@@ -358,7 +384,6 @@ async def handle_message(text: str) -> None:
     # cascades when 2-3 signals fire in close succession on a small account.
     notional_gbp = (total_units * signal.entry) / gbp_usd
     est_margin_required = notional_gbp * 0.04  # 4% — slightly conservative
-    nav = balance + margin_used  # rough NAV proxy
     free_after = margin_available - est_margin_required
     free_after_pct = (free_after / nav * 100) if nav > 0 else 0
 
