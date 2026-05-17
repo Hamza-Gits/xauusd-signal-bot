@@ -84,6 +84,21 @@ class OandaClient:
         )
         return data.get("trades", [])
 
+    def get_pending_orders(self) -> list:
+        """Return all currently pending (unfilled) orders."""
+        data = self._request(
+            "GET",
+            f"/v3/accounts/{self.account_id}/pendingOrders",
+        )
+        return data.get("orders", [])
+
+    def cancel_order(self, order_id: str) -> dict:
+        """Cancel a pending order."""
+        return self._request(
+            "PUT",
+            f"/v3/accounts/{self.account_id}/orders/{order_id}/cancel",
+        )
+
     def modify_trade_sl(self, trade_id: str, new_sl_price: float, price_precision: int = 3) -> dict:
         """Replace the stop-loss order attached to an open trade."""
         body = {

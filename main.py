@@ -3,12 +3,17 @@
 Listens to configured Telegram groups, parses XAUUSD signals, and places
 LIMIT orders on OANDA with risk-based position sizing.
 
-Strategy:
+Strategy (Qasem-optimised):
 - Each signal is split into up to 3 sub-orders (legs) targeting TP1/TP2/TP3,
   sharing the same SL. Total risk = config.RISK_PCT (default 3%).
+- Weighting is TP3-heavy (20/30/50) because ~60% of Qasem's wins run all the
+  way to TP3 — heavier size on the leg that pays out the most.
 - When the TP1 leg closes in profit, the SL on the remaining open legs (TP2,
-  TP3) is moved to the entry price (breakeven), so the runners become
-  free-money positions.
+  TP3) is moved to the entry price (breakeven). Runners become risk-free.
+- When the TP2 leg closes in profit, the TP3 leg's SL is moved up to the TP1
+  price — locks in profit on the runner even if it doesn't reach TP3.
+- LIMIT orders that don't fill within 60 minutes are auto-cancelled, so a
+  stale signal never blocks margin from a fresh one.
 """
 import asyncio
 import hashlib
@@ -16,6 +21,7 @@ import logging
 import math
 import sys
 import time
+from datetime import datetime, timezone
 
 import config
 from oanda_client import OandaClient, OandaError
@@ -51,6 +57,7 @@ oanda: OandaClient
 risk: RiskManager
 listener: TelegramListener
 check_closed_trades_task: asyncio.Task = None
+cancel_stale_task: asyncio.Task = None
 
 
 def _signal_id(signal: Signal) -> str:
@@ -59,19 +66,37 @@ def _signal_id(signal: Signal) -> str:
     return hashlib.md5(key.encode()).hexdigest()[:12]
 
 
+# Leg weights — TP3-heavy because 60% of Qasem wins run all the way to TP3.
+# Order: [TP1_weight, TP2_weight, TP3_weight] (only used for 3-leg signals).
+LEG_WEIGHTS = {
+    3: [0.20, 0.30, 0.50],
+    2: [0.40, 0.60],
+    1: [1.00],
+}
+
+
 def _split_units(total: float, num_legs: int, precision: int = 1, min_size: float = 0.1) -> list:
-    """Split `total` units across `num_legs`, each ≥ min_size, rounded down to precision."""
+    """Weighted split of `total` units across `num_legs`.
+
+    Uses TP3-heavy weights (20/30/50 for 3 legs) so the TP3 runner — which
+    wins ~60% of the time on Qasem — carries the bulk of the position.
+
+    Each leg is floored to `precision` and must be ≥ `min_size`. Any rounding
+    remainder lands on the last (heaviest) leg. Falls back to fewer legs if a
+    smaller leg would otherwise be under the broker minimum.
+    """
     step = 10 ** -precision
     legs_wanted = num_legs
-    while legs_wanted > 1:
-        per = math.floor((total / legs_wanted) / step) * step
-        per = round(per, precision)
-        if per >= min_size:
-            legs = [per] * (legs_wanted - 1)
-            last = round(total - per * (legs_wanted - 1), precision)
-            if last >= min_size:
-                legs.append(last)
-                return legs
+    while legs_wanted > 0:
+        weights = LEG_WEIGHTS.get(legs_wanted, [1.0])
+        legs = []
+        for w in weights[:-1]:
+            u = math.floor((total * w) / step) * step
+            legs.append(round(u, precision))
+        last = round(total - sum(legs), precision)
+        legs.append(last)
+        if all(u >= min_size for u in legs):
+            return legs
         legs_wanted -= 1
     return [total]
 
@@ -94,9 +119,10 @@ async def check_closed_trades():
             }
             by_order_id = {t["order_id"]: t for t in journal["trades"]}
 
-            # Track signal groups that just had a winning leg close — we'll
-            # move SL to BE on their remaining open legs after this pass.
-            newly_won_groups = set()
+            # Track signal groups by which TP leg just won — different actions
+            # for each (TP1 win → BE move, TP2 win → trail TP3 leg to TP1).
+            tp1_won_groups = set()
+            tp2_won_groups = set()
 
             for trade in closed:
                 ext_id = (trade.get("clientExtensions") or {}).get("id")
@@ -118,14 +144,20 @@ async def check_closed_trades():
                 update_closed_trade(journal_entry["order_id"], closing_price, result)
 
                 if result == "WIN" and journal_entry.get("signal_id"):
-                    newly_won_groups.add(journal_entry["signal_id"])
+                    label = journal_entry.get("tp_label")
+                    if label == "TP1":
+                        tp1_won_groups.add(journal_entry["signal_id"])
+                    elif label == "TP2":
+                        tp2_won_groups.add(journal_entry["signal_id"])
 
-            # For every signal group that just had a leg win, move SL on the
-            # other (still-open) legs to the entry price.
-            if newly_won_groups:
-                await _move_runners_to_breakeven(newly_won_groups)
+            # TP1 win → move all remaining legs' SL to entry (breakeven).
+            if tp1_won_groups:
+                await _move_runners_to_breakeven(tp1_won_groups)
+            # TP2 win → ratchet the TP3 leg's SL up to TP1 price (lock profit).
+            if tp2_won_groups:
+                await _trail_tp3_to_tp1(tp2_won_groups)
 
-            if newly_won_groups or closed:
+            if tp1_won_groups or tp2_won_groups or closed:
                 wins, losses = get_win_loss_count()
                 logger.info(f"Trade history: {wins}W / {losses}L")
         except OandaError:
@@ -177,6 +209,109 @@ async def _move_runners_to_breakeven(signal_ids: set):
                 )
             except OandaError as e:
                 logger.warning(f"Could not move SL on trade {trade_id}: {e}")
+
+
+async def _trail_tp3_to_tp1(signal_ids: set):
+    """When TP2 fills, ratchet the TP3 leg's SL up to the TP1 price.
+
+    This locks in TP1-worth of profit on the runner — if it then reverses
+    short of TP3 instead of running all the way, we still book a small win
+    on that leg instead of letting it close at breakeven.
+    """
+    try:
+        open_trades = oanda.get_open_trades()
+    except OandaError:
+        logger.exception("Could not fetch open trades for TP3 trail")
+        return
+
+    open_by_client_id = {}
+    for ot in open_trades:
+        cid = (ot.get("clientExtensions") or {}).get("id")
+        if cid:
+            open_by_client_id[cid] = ot
+
+    for sid in signal_ids:
+        legs = find_legs_by_signal(sid)
+        tp1_leg = next((l for l in legs if l.get("tp_label") == "TP1"), None)
+        tp3_leg = next((l for l in legs if l.get("tp_label") == "TP3"), None)
+        if not tp1_leg or not tp3_leg:
+            continue
+        if tp3_leg.get("result"):
+            continue  # TP3 already closed (likely already hit, nothing to do)
+        client_id = tp3_leg.get("client_id")
+        ot = open_by_client_id.get(client_id) if client_id else None
+        if ot is None:
+            continue
+        tp1_price = tp1_leg["take_profit"]
+        trade_id = str(ot["id"])
+        try:
+            oanda.modify_trade_sl(trade_id, tp1_price)
+            mark_be_moved(tp3_leg["order_id"])  # reuse flag — leg's SL is no longer original
+            logger.info(
+                f"Trail: signal {sid} TP3 leg trade {trade_id} → SL@TP1 ({tp1_price})"
+            )
+            await _notify(
+                f"📈 TP3 runner SL → TP1 price ({tp1_price}) "
+                f"({tp3_leg['direction']}, profit locked)"
+            )
+        except OandaError as e:
+            logger.warning(f"Could not trail TP3 SL on trade {trade_id}: {e}")
+
+
+async def cancel_stale_orders():
+    """Cancel any LIMIT order that hasn't filled within STALE_MINUTES.
+
+    Frees margin tied up by Qasem signals whose entry price was never reached
+    so a fresh signal can be opened in its place.
+    """
+    STALE_MINUTES = 60
+    while True:
+        try:
+            await asyncio.sleep(300)  # check every 5 min
+            try:
+                pending = oanda.get_pending_orders()
+            except OandaError:
+                logger.exception("Could not fetch pending orders")
+                continue
+
+            now = datetime.now(timezone.utc)
+            for order in pending:
+                if order.get("type") != "LIMIT":
+                    continue
+                created_str = order.get("createTime", "")
+                if not created_str:
+                    continue
+                # OANDA returns nanosecond-precision RFC3339 — truncate to micro for fromisoformat.
+                cleaned = created_str.replace("Z", "+00:00")
+                # Trim sub-second precision beyond 6 digits (Python max).
+                if "." in cleaned:
+                    head, tail = cleaned.split(".", 1)
+                    tz_idx = max(tail.find("+"), tail.find("-"))
+                    if tz_idx >= 0:
+                        frac, tz = tail[:tz_idx], tail[tz_idx:]
+                    else:
+                        frac, tz = tail, ""
+                    cleaned = f"{head}.{frac[:6]}{tz}"
+                try:
+                    created = datetime.fromisoformat(cleaned)
+                except ValueError:
+                    continue
+                age_min = (now - created).total_seconds() / 60
+                if age_min < STALE_MINUTES:
+                    continue
+                order_id = str(order["id"])
+                try:
+                    oanda.cancel_order(order_id)
+                    logger.info(
+                        f"Cancelled stale LIMIT order {order_id} "
+                        f"(age={age_min:.0f} min) — entry never filled"
+                    )
+                except OandaError as e:
+                    logger.warning(f"Could not cancel stale order {order_id}: {e}")
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.exception("Unexpected error in cancel_stale_orders")
 
 
 async def handle_message(text: str) -> None:
@@ -263,10 +398,17 @@ async def handle_message(text: str) -> None:
         tp_levels.append(("TP3", signal.tp3))
 
     # Try to split units across all available TPs; fall back to fewer legs if
-    # rounding takes us below OANDA's minimum trade size.
+    # rounding takes us below OANDA's minimum trade size. When falling back
+    # from 3→2 legs, drop TP2 (the lowest-EV leg) and keep TP1 + TP3. When
+    # falling back to 1 leg, keep TP3 — the runner that wins 60% of the time.
     leg_units = _split_units(total_units, len(tp_levels), precision=1, min_size=0.1)
     if len(leg_units) < len(tp_levels):
-        tp_levels = tp_levels[: len(leg_units)]
+        if len(tp_levels) == 3 and len(leg_units) == 2:
+            tp_levels = [tp_levels[0], tp_levels[2]]  # TP1 + TP3
+        elif len(tp_levels) == 3 and len(leg_units) == 1:
+            tp_levels = [tp_levels[2]]                # TP3 only
+        else:
+            tp_levels = tp_levels[: len(leg_units)]
     logger.info(
         f"Splitting {total_units} units across {len(leg_units)} legs: "
         f"{list(zip([l for l, _ in tp_levels], leg_units))}"
@@ -341,7 +483,7 @@ async def _notify(text: str) -> None:
 
 
 async def main_async():
-    global oanda, risk, listener, check_closed_trades_task
+    global oanda, risk, listener, check_closed_trades_task, cancel_stale_task
 
     setup_logging()
     logger.info(f"Starting up. OANDA env={config.OANDA_ENV}, instrument={config.INSTRUMENT}")
@@ -408,6 +550,7 @@ async def main_async():
 
     # Start background task to check for closed trades
     check_closed_trades_task = asyncio.create_task(check_closed_trades())
+    cancel_stale_task = asyncio.create_task(cancel_stale_orders())
 
     # Exit cleanly after 330 min so GitHub Actions marks the job as SUCCESS.
     # The next scheduled run (every 6 h) picks up immediately after.
