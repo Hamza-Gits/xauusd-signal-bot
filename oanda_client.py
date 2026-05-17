@@ -76,6 +76,28 @@ class OandaClient:
         )
         return data.get("trades", [])
 
+    def get_open_trades(self) -> list:
+        """Return all currently open trades."""
+        data = self._request(
+            "GET",
+            f"/v3/accounts/{self.account_id}/openTrades",
+        )
+        return data.get("trades", [])
+
+    def modify_trade_sl(self, trade_id: str, new_sl_price: float, price_precision: int = 3) -> dict:
+        """Replace the stop-loss order attached to an open trade."""
+        body = {
+            "stopLoss": {
+                "price": f"{new_sl_price:.{price_precision}f}",
+                "timeInForce": "GTC",
+            }
+        }
+        return self._request(
+            "PUT",
+            f"/v3/accounts/{self.account_id}/trades/{trade_id}/orders",
+            json=body,
+        )
+
     def get_price(self, instrument: str) -> float:
         """Return the current mid price for an instrument (e.g. GBP_USD)."""
         data = self._request(
@@ -102,6 +124,8 @@ class OandaClient:
         time_in_force: str = "GTC",
         price_precision: int = 3,
         units_precision: int = 1,
+        client_id: Optional[str] = None,
+        client_tag: Optional[str] = None,
     ) -> dict:
         """Place a LIMIT order with attached SL and TP.
 
@@ -118,24 +142,40 @@ class OandaClient:
         signed_units = units if direction == "BUY" else -units
         units_str = f"{signed_units:.{units_precision}f}"
 
-        body = {
-            "order": {
-                "type": "LIMIT",
-                "instrument": instrument,
-                "units": units_str,
-                "price": f"{entry:.{price_precision}f}",
-                "timeInForce": time_in_force,
-                "positionFill": "DEFAULT",
-                "stopLossOnFill": {
-                    "price": f"{stop_loss:.{price_precision}f}",
-                    "timeInForce": "GTC",
-                },
-                "takeProfitOnFill": {
-                    "price": f"{take_profit:.{price_precision}f}",
-                    "timeInForce": "GTC",
-                },
-            }
+        order_body = {
+            "type": "LIMIT",
+            "instrument": instrument,
+            "units": units_str,
+            "price": f"{entry:.{price_precision}f}",
+            "timeInForce": time_in_force,
+            "positionFill": "DEFAULT",
+            "stopLossOnFill": {
+                "price": f"{stop_loss:.{price_precision}f}",
+                "timeInForce": "GTC",
+            },
+            "takeProfitOnFill": {
+                "price": f"{take_profit:.{price_precision}f}",
+                "timeInForce": "GTC",
+            },
         }
+
+        # Attach client-side identifiers so we can group multi-leg orders.
+        if client_id or client_tag:
+            ext = {}
+            if client_id:
+                ext["id"] = client_id
+            if client_tag:
+                ext["tag"] = client_tag
+            order_body["clientExtensions"] = ext
+            # Propagate the same tag to the trade itself so we can find it after fill.
+            trade_ext = {}
+            if client_id:
+                trade_ext["id"] = client_id
+            if client_tag:
+                trade_ext["tag"] = client_tag
+            order_body["tradeClientExtensions"] = trade_ext
+
+        body = {"order": order_body}
 
         logger.info(f"Submitting OANDA limit order: {body}")
         return self._request(
