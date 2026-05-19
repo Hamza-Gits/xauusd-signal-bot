@@ -68,9 +68,13 @@ def _signal_id(signal: Signal) -> str:
 
 # Leg weights — TP3-heavy because 60% of Qasem wins run all the way to TP3.
 # Order: [TP1_weight, TP2_weight, TP3_weight] (only used for 3-leg signals).
+# Note: on small accounts (~£250) the leg-1/leg-2 sizes get floored to the
+# 0.1-oz OANDA minimum regardless of these weights, so the practical effect
+# kicks in once the account grows past ~£500. On £250 the runner already
+# gets the rounding remainder, which is most of the position.
 LEG_WEIGHTS = {
-    3: [0.20, 0.30, 0.50],
-    2: [0.40, 0.60],
+    3: [0.15, 0.25, 0.60],
+    2: [0.35, 0.65],
     1: [1.00],
 }
 
