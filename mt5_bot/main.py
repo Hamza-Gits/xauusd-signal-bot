@@ -95,14 +95,47 @@ def _split_lots(total: float, num_legs: int, lot_step: float, min_lot: float) ->
 
 # ---- Starting balance bootstrap ----
 def load_or_init_starting_balance(current_balance: float) -> float:
+    """Resolve the IMMOVABLE baseline for max-DD calculations.
+
+    Priority:
+      1. MT5_INITIAL_BALANCE env var (recommended — set this explicitly)
+      2. Cached value in starting_balance.json (from a previous run)
+      3. Auto-init from current balance (LAST RESORT — wrong if you've
+         already drawn down before starting the bot)
+    """
     path = Path(config.STARTING_BALANCE_FILE)
+
+    # Env var wins — overrides any cached or auto-detected value
+    if config.MT5_INITIAL_BALANCE:
+        with open(path, "w") as f:
+            json.dump({
+                "starting_balance": config.MT5_INITIAL_BALANCE,
+                "source": "env_var",
+                "set_at": datetime.utcnow().isoformat(),
+            }, f, indent=2)
+        logger.info(f"Starting balance set from env: ${config.MT5_INITIAL_BALANCE:.2f}")
+        return config.MT5_INITIAL_BALANCE
+
     if path.exists():
         with open(path) as f:
             data = json.load(f)
-            return float(data["starting_balance"])
+            sb = float(data["starting_balance"])
+            logger.info(f"Starting balance loaded from cache: ${sb:.2f}")
+            return sb
+
+    # Auto-init fallback — warn loudly because this can be wrong
+    logger.warning(
+        f"⚠️  No MT5_INITIAL_BALANCE set and no cache file. Auto-initialising "
+        f"baseline to current equity ${current_balance:.2f}. If you have ALREADY "
+        f"drawn down on this account, max-DD calculations will be wrong. "
+        f"Set MT5_INITIAL_BALANCE in .env to the original account size."
+    )
     with open(path, "w") as f:
-        json.dump({"starting_balance": current_balance, "initialised_at": datetime.utcnow().isoformat()}, f, indent=2)
-    logger.info(f"Initialised starting balance: ${current_balance:.2f}")
+        json.dump({
+            "starting_balance": current_balance,
+            "source": "auto_init",
+            "set_at": datetime.utcnow().isoformat(),
+        }, f, indent=2)
     return current_balance
 
 

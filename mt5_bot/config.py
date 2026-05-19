@@ -42,27 +42,34 @@ TELEGRAM_GROUP_IDS = [g.strip() for g in _raw_groups.split(",") if g.strip()]
 NOTIFY_CHAT_ID = os.getenv("NOTIFY_CHAT_ID", "").strip()
 
 # ---- Risk ----
-# 1% per signal on $5K = $50 risk per signal.
-RISK_PCT = float(os.getenv("RISK_PCT", "0.01"))
+# 5ers Bootcamp Phase 1: max DD is 5% absolute from initial balance,
+# NO daily loss limit. Profit target ~10% to advance.
+# Risk per signal kept very tight because each SL bites a noticeable
+# chunk out of the 5% drawdown budget.
+RISK_PCT = float(os.getenv("RISK_PCT", "0.0025"))  # 0.25% = $12.50/signal on $5K
 
-# ---- Prop firm safety guards (5ers Standard / Bootcamp defaults) ----
-# Daily loss circuit breaker — stop trading for the rest of the day if
-# daily P&L drops below this %. 5ers' actual daily limit is typically 5%,
-# we trip at 3% to keep a 2% safety buffer.
-DAILY_LOSS_HALT_PCT = float(os.getenv("DAILY_LOSS_HALT_PCT", "0.03"))
+# ---- Prop firm safety guards ----
+# 5ers Bootcamp has NO daily loss limit, so we set this very high
+# (effectively disabling it). Override via env if your plan differs.
+DAILY_LOSS_HALT_PCT = float(os.getenv("DAILY_LOSS_HALT_PCT", "1.0"))  # 100% = disabled
 
-# Consecutive loss pause — after this many SLs in a row, pause for an hour.
-# Prevents catastrophic loss-streaks from compounding into account death.
-CONSECUTIVE_LOSS_HALT = int(os.getenv("CONSECUTIVE_LOSS_HALT", "3"))
-CONSECUTIVE_LOSS_PAUSE_MIN = int(os.getenv("CONSECUTIVE_LOSS_PAUSE_MIN", "60"))
+# Consecutive loss pause — pause trading after N SLs in a row. Tighter
+# than the OANDA defaults because we have less margin for error here.
+CONSECUTIVE_LOSS_HALT = int(os.getenv("CONSECUTIVE_LOSS_HALT", "2"))
+CONSECUTIVE_LOSS_PAUSE_MIN = int(os.getenv("CONSECUTIVE_LOSS_PAUSE_MIN", "120"))
 
-# Total drawdown floor — if account equity drops below this % of starting
-# balance, halt the bot entirely. 5ers' actual limit is typically 8-10%,
-# we trip at 5% to give a 3-5% safety buffer.
-TOTAL_DD_HALT_PCT = float(os.getenv("TOTAL_DD_HALT_PCT", "0.05"))
+# Total drawdown floor — hard halt if equity drops this % below the
+# INITIAL balance (not current). 5ers actual limit is 5%; we halt at
+# 4.5% to leave a tiny safety buffer for slippage on the closing trade.
+TOTAL_DD_HALT_PCT = float(os.getenv("TOTAL_DD_HALT_PCT", "0.045"))
 
-# Starting balance baseline — used for total DD calculations. Updated
-# automatically the first time the bot starts on a fresh account.
+# IMPORTANT: this is the ORIGINAL account starting balance, not your
+# current equity. For a 5ers $5K Bootcamp, this MUST be 5000.00 even
+# if you've already drawn down. The bot uses this as the immovable
+# baseline for max-DD calculations. If unset, the bot will auto-detect
+# from your first balance reading — which can be wrong if you've
+# already lost money.
+MT5_INITIAL_BALANCE = float(os.getenv("MT5_INITIAL_BALANCE", "0")) or None
 STARTING_BALANCE_FILE = "starting_balance.json"
 
 # Account currency (5ers MT5 accounts are USD)
