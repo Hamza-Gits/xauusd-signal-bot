@@ -46,7 +46,7 @@ NOTIFY_CHAT_ID = os.getenv("NOTIFY_CHAT_ID", "").strip()
 # NO daily loss limit. Profit target ~10% to advance.
 # Risk per signal kept very tight because each SL bites a noticeable
 # chunk out of the 5% drawdown budget.
-RISK_PCT = float(os.getenv("RISK_PCT", "0.0025"))  # 0.25% = $12.50/signal on $5K
+RISK_PCT = float(os.getenv("RISK_PCT", "0.005"))  # 0.5% = $25/signal on $5K
 
 # ---- Prop firm safety guards ----
 # 5ers Bootcamp has NO daily loss limit, so we set this very high
