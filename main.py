@@ -74,6 +74,21 @@ LEG_WEIGHTS = {
     1: [1.00],
 }
 
+# Shave this much off every TP, toward entry, so OANDA's bid/ask actually
+# touches our TP even when the signal provider's broker has a tighter spread
+# or shows a different mid price. Without this buffer, signals that report
+# "TP1 hit" on Qasem's feed can leave us unfilled and run to SL (e.g. the
+# 19/05 trade: Qasem said TP1 hit at 4518 but OANDA's bid never touched it,
+# costing us a full 3% on a trade that "should have" booked TP1).
+TP_BUFFER = 0.5
+
+
+def _buffered_tp(direction: str, tp_price: float) -> float:
+    """Shift TP toward entry by TP_BUFFER so it's easier for OANDA's quote to reach it."""
+    if direction == "BUY":
+        return tp_price - TP_BUFFER
+    return tp_price + TP_BUFFER
+
 
 def _split_units(total: float, num_legs: int, precision: int = 1, min_size: float = 0.1) -> list:
     """Weighted split of `total` units across `num_legs`.
@@ -444,13 +459,16 @@ async def handle_message(text: str) -> None:
 
     for (tp_label, tp_price), units in zip(tp_levels, leg_units):
         client_id = f"{sid}-{tp_label}"
+        # Apply spread buffer — what we actually send to OANDA is slightly
+        # closer to entry than what the signal called for.
+        placed_tp = _buffered_tp(signal.direction, tp_price)
         try:
             result = oanda.place_limit_order(
                 direction=signal.direction,
                 units=units,
                 entry=signal.entry,
                 stop_loss=signal.stop_loss,
-                take_profit=tp_price,
+                take_profit=placed_tp,
                 instrument=config.INSTRUMENT,
                 client_id=client_id,
                 client_tag=sid,
@@ -461,19 +479,19 @@ async def handle_message(text: str) -> None:
             continue
 
         order_id = result.get("orderCreateTransaction", {}).get("id", "unknown")
-        logger.info(f"Order placed [{tp_label}] units={units} ID={order_id}")
+        logger.info(f"Order placed [{tp_label}] units={units} TP={placed_tp} (signal={tp_price}) ID={order_id}")
         log_order(
             order_id=order_id,
             direction=signal.direction,
             entry=signal.entry,
             stop_loss=signal.stop_loss,
-            take_profit=tp_price,
+            take_profit=placed_tp,  # store buffered TP so trail-to-TP1 matches what OANDA holds
             units=units,
             signal_id=sid,
             tp_label=tp_label,
             client_id=client_id,
         )
-        placed.append((tp_label, tp_price, units, order_id))
+        placed.append((tp_label, placed_tp, units, order_id))
 
     if not placed:
         return  # All legs failed; nothing to report beyond the per-leg errors above.
