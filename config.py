@@ -35,6 +35,16 @@ TELEGRAM_GROUP_IDS = [g.strip() for g in _raw_groups.split(",") if g.strip()]
 RISK_PCT = float(os.getenv("RISK_PCT", "0.035"))
 FORCE_MIN_UNITS = os.getenv("FORCE_MIN_UNITS", "true").lower() == "true"
 
+# Entry chase — when a BUY signal arrives but ASK is already above signal entry
+# (price moved up before we could place the LIMIT), market-in at current price
+# IF we're still within MAX_ENTRY_CHASE_USD of the original entry. Beyond that,
+# skip the signal: R:R has decayed too much and SL distance is too wide.
+# Set to 0 to disable chasing entirely (pure LIMIT behaviour).
+MAX_ENTRY_CHASE_USD = float(os.getenv("MAX_ENTRY_CHASE_USD", "2.0"))
+# Don't keep a TP leg if it's within MIN_TP_DISTANCE_USD of the effective entry
+# (would close almost immediately for ~zero profit, wasting the leg).
+MIN_TP_DISTANCE_USD = float(os.getenv("MIN_TP_DISTANCE_USD", "0.8"))
+
 # Notifications
 NOTIFY_CHAT_ID = os.getenv("NOTIFY_CHAT_ID", "").strip()
 

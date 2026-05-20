@@ -382,15 +382,79 @@ async def handle_message(text: str) -> None:
         margin_available = float(account.get("marginAvailable", 0))
         margin_used = float(account.get("marginUsed", 0))
         gbp_usd = oanda.get_price("GBP_USD")
+        xau_bid, xau_ask = oanda.get_quote(config.INSTRUMENT)
     except OandaError as e:
         logger.error(f"Failed to fetch account/price data: {e}")
         return
+
+    # ---- Entry decision: LIMIT vs MARKET vs SKIP ----
+    # For a BUY signal we pay the ASK. If ASK is already at or above entry, a
+    # LIMIT @ entry will never fill (it only fills when ASK ≤ limit). In that
+    # case, if we're still within MAX_ENTRY_CHASE_USD of the signal entry,
+    # market-in at the current price (chase). Otherwise skip — too far gone.
+    # Mirror logic for SELL with BID.
+    if signal.direction == "BUY":
+        quote = xau_ask
+        if quote <= signal.entry:
+            order_type = "LIMIT"
+            effective_entry = signal.entry
+        elif quote <= signal.entry + config.MAX_ENTRY_CHASE_USD:
+            order_type = "MARKET"
+            effective_entry = quote
+        else:
+            logger.warning(
+                f"BUY @ {signal.entry}: ASK={quote:.3f} too far above entry "
+                f"(>{config.MAX_ENTRY_CHASE_USD}). Skipping."
+            )
+            await _notify(
+                f"⏭️ Skipped BUY @ {signal.entry} — ASK already at {quote:.2f}, "
+                f"too far to chase (max {config.MAX_ENTRY_CHASE_USD} USD)"
+            )
+            return
+    else:  # SELL
+        quote = xau_bid
+        if quote >= signal.entry:
+            order_type = "LIMIT"
+            effective_entry = signal.entry
+        elif quote >= signal.entry - config.MAX_ENTRY_CHASE_USD:
+            order_type = "MARKET"
+            effective_entry = quote
+        else:
+            logger.warning(
+                f"SELL @ {signal.entry}: BID={quote:.3f} too far below entry "
+                f"(>{config.MAX_ENTRY_CHASE_USD}). Skipping."
+            )
+            await _notify(
+                f"⏭️ Skipped SELL @ {signal.entry} — BID already at {quote:.2f}, "
+                f"too far to chase (max {config.MAX_ENTRY_CHASE_USD} USD)"
+            )
+            return
+
+    # Safety: ensure SL still makes sense relative to effective entry.
+    if signal.direction == "BUY" and signal.stop_loss >= effective_entry:
+        logger.warning(f"After chase, SL {signal.stop_loss} not below entry {effective_entry} — skipping")
+        await _notify(f"⏭️ Skipped — SL {signal.stop_loss} not below chase entry {effective_entry:.2f}")
+        return
+    if signal.direction == "SELL" and signal.stop_loss <= effective_entry:
+        logger.warning(f"After chase, SL {signal.stop_loss} not above entry {effective_entry} — skipping")
+        await _notify(f"⏭️ Skipped — SL {signal.stop_loss} not above chase entry {effective_entry:.2f}")
+        return
+
+    logger.info(
+        f"Entry decision: {order_type} (signal entry={signal.entry}, "
+        f"current {'ASK' if signal.direction == 'BUY' else 'BID'}={quote:.3f}, "
+        f"effective={effective_entry:.3f})"
+    )
 
     risk_manager = RiskManager(
         risk_pct=config.RISK_PCT,
         force_min_units=config.FORCE_MIN_UNITS,
     )
-    total_units = risk_manager.calculate_units(balance, gbp_usd, signal)
+    # Pass effective entry so SL-distance and unit sizing reflect the price
+    # we'll actually fill at (chase widens SL distance → smaller position).
+    total_units = risk_manager.calculate_units(
+        balance, gbp_usd, signal, entry_override=effective_entry
+    )
     if total_units is None:
         logger.warning("No units to trade — skipping")
         return
@@ -401,7 +465,7 @@ async def handle_message(text: str) -> None:
     # If placing this trade would leave us with less than 30% free margin
     # of the total account NAV, we skip it — protects against margin-call
     # cascades when 2-3 signals fire in close succession on a small account.
-    notional_gbp = (total_units * signal.entry) / gbp_usd
+    notional_gbp = (total_units * effective_entry) / gbp_usd
     est_margin_required = notional_gbp * 0.04  # 4% — slightly conservative
     free_after = margin_available - est_margin_required
     free_after_pct = (free_after / nav * 100) if nav > 0 else 0
@@ -434,12 +498,34 @@ async def handle_message(text: str) -> None:
         )
         return
 
-    # Build list of (tp_label, tp_price) — only TPs the signal actually provided.
-    tp_levels = [("TP1", signal.tp1)]
+    # Build list of (tp_label, tp_price) — only TPs the signal actually provided,
+    # AND only those still ahead of the effective entry. When we chase a BUY,
+    # TP1 may now be behind us; placing a leg with a TP at-or-behind entry would
+    # close immediately for ~0 profit and waste the leg's size + spread.
+    candidate_tps = [("TP1", signal.tp1)]
     if signal.tp2 is not None:
-        tp_levels.append(("TP2", signal.tp2))
+        candidate_tps.append(("TP2", signal.tp2))
     if signal.tp3 is not None:
-        tp_levels.append(("TP3", signal.tp3))
+        candidate_tps.append(("TP3", signal.tp3))
+
+    def _tp_ahead(tp_price: float) -> bool:
+        if signal.direction == "BUY":
+            return tp_price > effective_entry + config.MIN_TP_DISTANCE_USD
+        return tp_price < effective_entry - config.MIN_TP_DISTANCE_USD
+
+    tp_levels = [(label, tp) for (label, tp) in candidate_tps if _tp_ahead(tp)]
+    dropped = [label for (label, tp) in candidate_tps if not _tp_ahead(tp)]
+    if dropped:
+        logger.info(f"Dropped TP legs behind effective entry {effective_entry:.3f}: {dropped}")
+    if not tp_levels:
+        logger.warning(
+            f"All TPs are at-or-behind effective entry {effective_entry:.3f} — skipping signal"
+        )
+        await _notify(
+            f"⏭️ Skipped {signal.direction} @ {signal.entry} — price moved past all TPs "
+            f"(now {quote:.2f})"
+        )
+        return
 
     # Try to split units across all available TPs; fall back to fewer legs if
     # rounding takes us below OANDA's minimum trade size. When falling back
@@ -467,27 +553,41 @@ async def handle_message(text: str) -> None:
         # closer to entry than what the signal called for.
         placed_tp = _buffered_tp(signal.direction, tp_price)
         try:
-            result = oanda.place_limit_order(
-                direction=signal.direction,
-                units=units,
-                entry=signal.entry,
-                stop_loss=signal.stop_loss,
-                take_profit=placed_tp,
-                instrument=config.INSTRUMENT,
-                client_id=client_id,
-                client_tag=sid,
-            )
+            if order_type == "MARKET":
+                result = oanda.place_market_order(
+                    direction=signal.direction,
+                    units=units,
+                    stop_loss=signal.stop_loss,
+                    take_profit=placed_tp,
+                    instrument=config.INSTRUMENT,
+                    client_id=client_id,
+                    client_tag=sid,
+                )
+            else:  # LIMIT
+                result = oanda.place_limit_order(
+                    direction=signal.direction,
+                    units=units,
+                    entry=signal.entry,
+                    stop_loss=signal.stop_loss,
+                    take_profit=placed_tp,
+                    instrument=config.INSTRUMENT,
+                    client_id=client_id,
+                    client_tag=sid,
+                )
         except OandaError as e:
             logger.error(f"Order placement failed for {tp_label}: {e}")
             await _notify(f"❌ {tp_label} leg failed for {signal.direction} @ {signal.entry}: {e}")
             continue
 
         order_id = result.get("orderCreateTransaction", {}).get("id", "unknown")
-        logger.info(f"Order placed [{tp_label}] units={units} TP={placed_tp} (signal={tp_price}) ID={order_id}")
+        logger.info(
+            f"Order placed [{order_type} {tp_label}] units={units} TP={placed_tp} "
+            f"(signal={tp_price}) ID={order_id}"
+        )
         log_order(
             order_id=order_id,
             direction=signal.direction,
-            entry=signal.entry,
+            entry=effective_entry,  # what we actually fill at (or our LIMIT price)
             stop_loss=signal.stop_loss,
             take_profit=placed_tp,  # store buffered TP so trail-to-TP1 matches what OANDA holds
             units=units,
@@ -501,7 +601,7 @@ async def handle_message(text: str) -> None:
         return  # All legs failed; nothing to report beyond the per-leg errors above.
 
     # Notify (full picture across all legs)
-    sl_dist = abs(signal.entry - signal.stop_loss)
+    sl_dist = abs(effective_entry - signal.stop_loss)
     total_units_placed = sum(u for _, _, u, _ in placed)
     risk_gbp = (sl_dist * total_units_placed) / gbp_usd
     risk_pct = (risk_gbp / balance) * 100
@@ -510,9 +610,15 @@ async def handle_message(text: str) -> None:
     legs_str = "\n".join(
         f"  {label}: {u} u @ {tp}" for label, tp, u, _ in placed
     )
+    chased_note = (
+        f"  ⚡ MARKET (chased — signal entry {signal.entry}, filled ~{effective_entry:.2f})\n"
+        if order_type == "MARKET"
+        else ""
+    )
     await _notify(
-        f"✅ {signal.direction} XAU/USD ({len(placed)}-leg)\n"
-        f"Entry: {signal.entry}\n"
+        f"✅ {signal.direction} XAU/USD ({len(placed)}-leg, {order_type})\n"
+        f"{chased_note}"
+        f"Entry: {effective_entry:.2f}\n"
         f"SL: {signal.stop_loss}\n"
         f"Legs:\n{legs_str}\n"
         f"Total units: {total_units_placed}  Risk: £{risk_gbp:.2f} ({risk_pct:.2f}%)\n"

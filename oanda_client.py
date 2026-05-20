@@ -115,6 +115,11 @@ class OandaClient:
 
     def get_price(self, instrument: str) -> float:
         """Return the current mid price for an instrument (e.g. GBP_USD)."""
+        bid, ask = self.get_quote(instrument)
+        return (bid + ask) / 2.0
+
+    def get_quote(self, instrument: str) -> tuple:
+        """Return (bid, ask) for an instrument."""
         data = self._request(
             "GET",
             f"/v3/accounts/{self.account_id}/pricing",
@@ -126,7 +131,7 @@ class OandaClient:
         p = prices[0]
         bid = float(p["bids"][0]["price"])
         ask = float(p["asks"][0]["price"])
-        return (bid + ask) / 2.0
+        return bid, ask
 
     def place_limit_order(
         self,
@@ -193,6 +198,70 @@ class OandaClient:
         body = {"order": order_body}
 
         logger.info(f"Submitting OANDA limit order: {body}")
+        return self._request(
+            "POST", f"/v3/accounts/{self.account_id}/orders", json=body
+        )
+
+    def place_market_order(
+        self,
+        direction: str,
+        units: float,
+        stop_loss: float,
+        take_profit: float,
+        instrument: str = "XAU_USD",
+        price_precision: int = 3,
+        units_precision: int = 1,
+        client_id: Optional[str] = None,
+        client_tag: Optional[str] = None,
+    ) -> dict:
+        """Place a MARKET order with attached SL and TP.
+
+        Used when the signal's entry has already been passed but price is
+        still in profitable territory — we chase the entry rather than miss
+        the signal entirely.
+        """
+        direction = direction.upper()
+        if direction not in ("BUY", "SELL"):
+            raise ValueError("direction must be BUY or SELL")
+        if units <= 0:
+            raise ValueError("units must be > 0")
+
+        signed_units = units if direction == "BUY" else -units
+        units_str = f"{signed_units:.{units_precision}f}"
+
+        order_body = {
+            "type": "MARKET",
+            "instrument": instrument,
+            "units": units_str,
+            "timeInForce": "FOK",  # fill-or-kill — don't sit if the book moves
+            "positionFill": "DEFAULT",
+            "stopLossOnFill": {
+                "price": f"{stop_loss:.{price_precision}f}",
+                "timeInForce": "GTC",
+            },
+            "takeProfitOnFill": {
+                "price": f"{take_profit:.{price_precision}f}",
+                "timeInForce": "GTC",
+            },
+        }
+
+        if client_id or client_tag:
+            ext = {}
+            if client_id:
+                ext["id"] = client_id
+            if client_tag:
+                ext["tag"] = client_tag
+            order_body["clientExtensions"] = ext
+            trade_ext = {}
+            if client_id:
+                trade_ext["id"] = client_id
+            if client_tag:
+                trade_ext["tag"] = client_tag
+            order_body["tradeClientExtensions"] = trade_ext
+
+        body = {"order": order_body}
+
+        logger.info(f"Submitting OANDA market order: {body}")
         return self._request(
             "POST", f"/v3/accounts/{self.account_id}/orders", json=body
         )

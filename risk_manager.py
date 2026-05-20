@@ -43,18 +43,24 @@ class RiskManager:
         balance_gbp: float,
         gbp_usd_rate: float,
         signal: Signal,
+        entry_override: Optional[float] = None,
     ) -> Optional[float]:
         """Calculate units for XAU/USD given account balance in GBP.
 
         XAU/USD on OANDA: 1 unit = 1 oz of gold, price quoted in USD.
         P&L per unit on a 1-point move = $1.
 
+        If `entry_override` is given (e.g. when chasing an entry that has
+        already moved past the signal's stated price), it replaces the
+        signal's entry for the purpose of SL-distance / risk calculation.
+
         Returns the units (rounded down to `units_precision` decimals), or None
         if sizing would fall below the broker minimum and force_min_units is False.
         """
         risk_gbp = balance_gbp * self.risk_pct
         risk_usd = risk_gbp * gbp_usd_rate
-        sl_distance = abs(signal.entry - signal.stop_loss)
+        effective_entry = entry_override if entry_override is not None else signal.entry
+        sl_distance = abs(effective_entry - signal.stop_loss)
 
         if sl_distance <= 0:
             logger.warning("Signal has zero SL distance — refusing to size")
